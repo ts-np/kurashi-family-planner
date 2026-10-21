@@ -1,0 +1,41 @@
+// Prototype schema: members/{email}: enabled boolean, provisioned only by project administrator.
+// households/family: payload (JSON string <=850000 chars), revision (positive int),
+// updatedAt (server timestamp), updatedBy (current authenticated UID <=128 chars).
+// Payload records are deeply validated in web/model.js. These Rules enforce the
+// envelope and authorization; arbitrary nested JSON is not parsed by Rules.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function googleUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    function member() {
+      return googleUser()
+        && exists(/databases/$(database)/documents/members/$(request.auth.token.email))
+        && get(/databases/$(database)/documents/members/$(request.auth.token.email)).data.enabled == true;
+    }
+    function validPlanner() {
+      let d = request.resource.data;
+      return d.keys().hasAll(['payload', 'revision', 'updatedAt', 'updatedBy'])
+        && d.keys().hasOnly(['payload', 'revision', 'updatedAt', 'updatedBy'])
+        && d.revision is int && d.revision > 0 && d.revision < 2147483647
+        && d.updatedAt is timestamp && d.updatedAt == request.time
+        && d.updatedBy is string && d.updatedBy.size() > 0 && d.updatedBy.size() <= 128
+        && d.updatedBy == request.auth.uid
+        && d.payload is string && d.payload.size() > 0 && d.payload.size() <= 850000;
+    }
+    match /members/{email} {
+      allow get: if googleUser() && email == request.auth.token.email;
+      allow list, write: if false;
+    }
+    match /households/family {
+      allow get: if member();
+      allow list, delete: if false;
+      allow create: if member() && validPlanner() && request.resource.data.revision == 1;
+      allow update: if member() && validPlanner() && request.resource.data.revision == resource.data.revision + 1;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
